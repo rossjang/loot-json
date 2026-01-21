@@ -1,0 +1,20 @@
+# Source files
+src/
+
+# Config files
+tsconfig.json
+.gitignore
+.eslintrc*
+.prettierrc*
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+coverage/
+
+# IDE
+.idea/
+.vscode/
+
+# Development
+node_modules/
