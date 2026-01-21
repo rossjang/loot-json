@@ -375,4 +375,339 @@ describe('SchemaValidator', () => {
       expect(result.errors.length).toBeGreaterThan(0);
     });
   });
+
+  // ============================================================================
+  // v0.5.0 - Composition Keywords
+  // ============================================================================
+
+  describe('v0.5.0 - allOf', () => {
+    const validator = new SchemaValidator();
+
+    it('should pass when all schemas match', () => {
+      const schema = {
+        allOf: [
+          { type: 'object' as const, properties: { a: { type: 'number' as const } } },
+          { type: 'object' as const, properties: { b: { type: 'string' as const } } },
+        ],
+      };
+
+      expect(validator.validate({ a: 1, b: 'test' }, schema).valid).toBe(true);
+    });
+
+    it('should fail when any schema does not match', () => {
+      const schema = {
+        allOf: [
+          { type: 'object' as const, properties: { a: { type: 'number' as const } } },
+          { type: 'object' as const, properties: { b: { type: 'string' as const } } },
+        ],
+      };
+
+      expect(validator.validate({ a: 'not a number', b: 'test' }, schema).valid).toBe(false);
+    });
+
+    it('should combine constraints', () => {
+      const schema = {
+        allOf: [
+          { type: 'number' as const, minimum: 0 },
+          { type: 'number' as const, maximum: 100 },
+        ],
+      };
+
+      expect(validator.validate(50, schema).valid).toBe(true);
+      expect(validator.validate(-10, schema).valid).toBe(false);
+      expect(validator.validate(150, schema).valid).toBe(false);
+    });
+  });
+
+  describe('v0.5.0 - anyOf', () => {
+    const validator = new SchemaValidator();
+
+    it('should pass when at least one schema matches', () => {
+      const schema = {
+        anyOf: [
+          { type: 'string' as const },
+          { type: 'number' as const },
+        ],
+      };
+
+      expect(validator.validate('hello', schema).valid).toBe(true);
+      expect(validator.validate(42, schema).valid).toBe(true);
+    });
+
+    it('should fail when no schema matches', () => {
+      const schema = {
+        anyOf: [
+          { type: 'string' as const },
+          { type: 'number' as const },
+        ],
+      };
+
+      expect(validator.validate(true, schema).valid).toBe(false);
+    });
+
+    it('should work with complex schemas', () => {
+      const schema = {
+        anyOf: [
+          { type: 'object' as const, required: ['name'] },
+          { type: 'object' as const, required: ['id'] },
+        ],
+      };
+
+      expect(validator.validate({ name: 'test' }, schema).valid).toBe(true);
+      expect(validator.validate({ id: 123 }, schema).valid).toBe(true);
+      expect(validator.validate({ other: true }, schema).valid).toBe(false);
+    });
+  });
+
+  describe('v0.5.0 - oneOf', () => {
+    const validator = new SchemaValidator();
+
+    it('should pass when exactly one schema matches', () => {
+      const schema = {
+        oneOf: [
+          { type: 'number' as const, multipleOf: 3 },
+          { type: 'number' as const, multipleOf: 5 },
+        ],
+      };
+
+      expect(validator.validate(9, schema).valid).toBe(true);  // only divisible by 3
+      expect(validator.validate(10, schema).valid).toBe(true); // only divisible by 5
+    });
+
+    it('should fail when multiple schemas match', () => {
+      const schema = {
+        oneOf: [
+          { type: 'number' as const, multipleOf: 3 },
+          { type: 'number' as const, multipleOf: 5 },
+        ],
+      };
+
+      expect(validator.validate(15, schema).valid).toBe(false); // divisible by both
+    });
+
+    it('should fail when no schema matches', () => {
+      const schema = {
+        oneOf: [
+          { type: 'number' as const, multipleOf: 3 },
+          { type: 'number' as const, multipleOf: 5 },
+        ],
+      };
+
+      expect(validator.validate(7, schema).valid).toBe(false); // divisible by neither
+    });
+  });
+
+  describe('v0.5.0 - not', () => {
+    const validator = new SchemaValidator();
+
+    it('should pass when schema does NOT match', () => {
+      const schema = {
+        not: { type: 'string' as const },
+      };
+
+      expect(validator.validate(42, schema).valid).toBe(true);
+      expect(validator.validate(true, schema).valid).toBe(true);
+    });
+
+    it('should fail when schema matches', () => {
+      const schema = {
+        not: { type: 'string' as const },
+      };
+
+      expect(validator.validate('hello', schema).valid).toBe(false);
+    });
+
+    it('should work with complex negation', () => {
+      const schema = {
+        type: 'number' as const,
+        not: { enum: [0, 1] },
+      };
+
+      expect(validator.validate(5, schema).valid).toBe(true);
+      expect(validator.validate(0, schema).valid).toBe(false);
+      expect(validator.validate(1, schema).valid).toBe(false);
+    });
+  });
+
+  // ============================================================================
+  // v0.5.0 - Conditional Keywords
+  // ============================================================================
+
+  describe('v0.5.0 - if/then/else', () => {
+    const validator = new SchemaValidator();
+
+    it('should apply then when if matches', () => {
+      const schema = {
+        type: 'object' as const,
+        if: {
+          properties: { type: { const: 'premium' } },
+        },
+        then: {
+          required: ['premiumFeature'],
+        },
+        else: {
+          required: ['basicFeature'],
+        },
+      };
+
+      expect(validator.validate({ type: 'premium', premiumFeature: true }, schema).valid).toBe(true);
+      expect(validator.validate({ type: 'premium' }, schema).valid).toBe(false); // missing premiumFeature
+    });
+
+    it('should apply else when if does not match', () => {
+      const schema = {
+        type: 'object' as const,
+        if: {
+          properties: { type: { const: 'premium' } },
+        },
+        then: {
+          required: ['premiumFeature'],
+        },
+        else: {
+          required: ['basicFeature'],
+        },
+      };
+
+      expect(validator.validate({ type: 'basic', basicFeature: true }, schema).valid).toBe(true);
+      expect(validator.validate({ type: 'basic' }, schema).valid).toBe(false); // missing basicFeature
+    });
+  });
+
+  // ============================================================================
+  // v0.5.0 - $ref Support
+  // ============================================================================
+
+  describe('v0.5.0 - $ref', () => {
+    const validator = new SchemaValidator();
+
+    it('should resolve $ref to definitions', () => {
+      const schema = {
+        definitions: {
+          address: {
+            type: 'object' as const,
+            properties: {
+              street: { type: 'string' as const },
+              city: { type: 'string' as const },
+            },
+            required: ['street', 'city'],
+          },
+        },
+        type: 'object' as const,
+        properties: {
+          home: { $ref: '#/definitions/address' },
+          work: { $ref: '#/definitions/address' },
+        },
+      };
+
+      const validData = {
+        home: { street: '123 Main St', city: 'NYC' },
+        work: { street: '456 Work Ave', city: 'LA' },
+      };
+
+      expect(validator.validate(validData, schema).valid).toBe(true);
+
+      const invalidData = {
+        home: { street: '123 Main St' }, // missing city
+        work: { street: '456 Work Ave', city: 'LA' },
+      };
+
+      expect(validator.validate(invalidData, schema).valid).toBe(false);
+    });
+
+    it('should handle nested $ref', () => {
+      const schema = {
+        definitions: {
+          item: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string' as const },
+              child: { $ref: '#/definitions/item' },
+            },
+          },
+        },
+        $ref: '#/definitions/item',
+      };
+
+      const data = {
+        name: 'parent',
+        child: {
+          name: 'child',
+          child: {
+            name: 'grandchild',
+          },
+        },
+      };
+
+      expect(validator.validate(data, schema).valid).toBe(true);
+    });
+  });
+
+  // ============================================================================
+  // v0.5.0 - Additional Object/Array Keywords
+  // ============================================================================
+
+  describe('v0.5.0 - patternProperties', () => {
+    const validator = new SchemaValidator();
+
+    it('should validate properties matching pattern', () => {
+      const schema = {
+        type: 'object' as const,
+        patternProperties: {
+          '^x-': { type: 'string' as const },
+        },
+      };
+
+      expect(validator.validate({ 'x-custom': 'value' }, schema).valid).toBe(true);
+      expect(validator.validate({ 'x-custom': 123 }, schema).valid).toBe(false);
+    });
+
+    it('should allow non-matching properties', () => {
+      const schema = {
+        type: 'object' as const,
+        patternProperties: {
+          '^x-': { type: 'string' as const },
+        },
+      };
+
+      expect(validator.validate({ normal: 123 }, schema).valid).toBe(true);
+    });
+  });
+
+  describe('v0.5.0 - propertyNames', () => {
+    const validator = new SchemaValidator();
+
+    it('should validate property names', () => {
+      const schema = {
+        type: 'object' as const,
+        propertyNames: {
+          pattern: '^[a-z]+$',
+        },
+      };
+
+      expect(validator.validate({ abc: 1, xyz: 2 }, schema).valid).toBe(true);
+      expect(validator.validate({ ABC: 1 }, schema).valid).toBe(false);
+    });
+  });
+
+  describe('v0.5.0 - contains', () => {
+    const validator = new SchemaValidator();
+
+    it('should pass when array contains matching item', () => {
+      const schema = {
+        type: 'array' as const,
+        contains: { type: 'string' as const },
+      };
+
+      expect(validator.validate([1, 'hello', 2], schema).valid).toBe(true);
+    });
+
+    it('should fail when array has no matching item', () => {
+      const schema = {
+        type: 'array' as const,
+        contains: { type: 'string' as const },
+      };
+
+      expect(validator.validate([1, 2, 3], schema).valid).toBe(false);
+    });
+  });
 });

@@ -1,17 +1,25 @@
 /**
- * 💎 loot-json schema validator
+ * 💎 loot-json schema validator (v0.5.0)
  * Lightweight JSON Schema validator (zero dependency)
+ *
+ * Features:
+ * - Composition keywords: allOf, anyOf, oneOf, not
+ * - Conditional keywords: if/then/else
+ * - $ref support with definitions
+ * - patternProperties, propertyNames, contains
  */
 
 import { LootSchema, SchemaType, ValidationError, ValidationResult } from './types';
 
 /**
  * JSON Schema validator
- * Supports a subset of JSON Schema Draft-07 keywords
+ * Supports extended subset of JSON Schema Draft-07 keywords
  */
 export class SchemaValidator {
   private errors: ValidationError[] = [];
   private path: string[] = [];
+  private rootSchema: LootSchema | null = null;
+  private definitions: Map<string, LootSchema> = new Map();
 
   /**
    * Validate data against a schema
@@ -38,6 +46,15 @@ export class SchemaValidator {
   validate<T = unknown>(data: unknown, schema: LootSchema): ValidationResult<T> {
     this.errors = [];
     this.path = [];
+    this.rootSchema = schema;
+    this.definitions = new Map();
+
+    // Extract definitions
+    if (schema.definitions) {
+      for (const [name, def] of Object.entries(schema.definitions)) {
+        this.definitions.set(`#/definitions/${name}`, def);
+      }
+    }
 
     this.validateValue(data, schema);
 
@@ -53,6 +70,41 @@ export class SchemaValidator {
   // ============================================================================
 
   private validateValue(value: unknown, schema: LootSchema): void {
+    // Handle $ref
+    if (schema.$ref) {
+      const resolvedSchema = this.resolveRef(schema.$ref);
+      if (resolvedSchema) {
+        this.validateValue(value, resolvedSchema);
+      } else {
+        this.addError('$ref', `Cannot resolve reference: ${schema.$ref}`, {
+          expected: schema.$ref,
+        });
+      }
+      return;
+    }
+
+    // Composition keywords (v0.5.0)
+    if (schema.allOf) {
+      this.validateAllOf(value, schema.allOf);
+    }
+
+    if (schema.anyOf) {
+      this.validateAnyOf(value, schema.anyOf);
+    }
+
+    if (schema.oneOf) {
+      this.validateOneOf(value, schema.oneOf);
+    }
+
+    if (schema.not) {
+      this.validateNot(value, schema.not);
+    }
+
+    // Conditional keywords (v0.5.0)
+    if (schema.if) {
+      this.validateConditional(value, schema);
+    }
+
     // Type validation
     if (schema.type !== undefined) {
       this.validateType(value, schema.type);
@@ -79,6 +131,134 @@ export class SchemaValidator {
       this.validateObject(value as Record<string, unknown>, schema);
     } else if (type === 'array') {
       this.validateArray(value as unknown[], schema);
+    }
+  }
+
+  // ============================================================================
+  // $ref Resolution (v0.5.0)
+  // ============================================================================
+
+  private resolveRef(ref: string): LootSchema | undefined {
+    // Handle local definitions
+    if (ref.startsWith('#/definitions/')) {
+      return this.definitions.get(ref);
+    }
+
+    // Handle root reference
+    if (ref === '#') {
+      return this.rootSchema ?? undefined;
+    }
+
+    // Handle JSON pointer paths
+    if (ref.startsWith('#/')) {
+      return this.resolveJsonPointer(ref.slice(1));
+    }
+
+    return undefined;
+  }
+
+  private resolveJsonPointer(pointer: string): LootSchema | undefined {
+    if (!this.rootSchema) return undefined;
+
+    const parts = pointer.split('/').filter((p) => p !== '');
+    let current: unknown = this.rootSchema;
+
+    for (const part of parts) {
+      if (current === null || typeof current !== 'object') {
+        return undefined;
+      }
+      const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+      current = (current as Record<string, unknown>)[key];
+    }
+
+    return current as LootSchema | undefined;
+  }
+
+  // ============================================================================
+  // Composition Keywords (v0.5.0)
+  // ============================================================================
+
+  private validateAllOf(value: unknown, schemas: LootSchema[]): void {
+    for (const subSchema of schemas) {
+      this.validateValue(value, subSchema);
+    }
+  }
+
+  private validateAnyOf(value: unknown, schemas: LootSchema[]): void {
+    let anyValid = false;
+
+    for (const subSchema of schemas) {
+      const subValidator = new SchemaValidator();
+      const result = subValidator.validate(value, subSchema);
+      if (result.valid) {
+        anyValid = true;
+        break;
+      }
+    }
+
+    if (!anyValid) {
+      this.addError('anyOf', 'Value must match at least one schema in anyOf', {
+        actual: value,
+      });
+    }
+  }
+
+  private validateOneOf(value: unknown, schemas: LootSchema[]): void {
+    let matchCount = 0;
+
+    for (const subSchema of schemas) {
+      const subValidator = new SchemaValidator();
+      const result = subValidator.validate(value, subSchema);
+      if (result.valid) {
+        matchCount++;
+      }
+    }
+
+    if (matchCount !== 1) {
+      this.addError(
+        'oneOf',
+        matchCount === 0
+          ? 'Value must match exactly one schema in oneOf (matched 0)'
+          : `Value must match exactly one schema in oneOf (matched ${matchCount})`,
+        {
+          actual: value,
+          expected: 1,
+        }
+      );
+    }
+  }
+
+  private validateNot(value: unknown, schema: LootSchema): void {
+    const subValidator = new SchemaValidator();
+    const result = subValidator.validate(value, schema);
+
+    if (result.valid) {
+      this.addError('not', 'Value must NOT match schema in "not"', {
+        actual: value,
+      });
+    }
+  }
+
+  // ============================================================================
+  // Conditional Keywords (v0.5.0)
+  // ============================================================================
+
+  private validateConditional(value: unknown, schema: LootSchema): void {
+    if (!schema.if) return;
+
+    const subValidator = new SchemaValidator();
+    const ifResult = subValidator.validate(value, schema.if);
+
+    if (ifResult.valid) {
+      // Apply "then" schema
+      if (schema.then) {
+        this.validateValue(value, schema.then);
+      }
+    } else {
+      // Apply "else" schema
+      if (schema.else) {
+        this.validateValue(value, schema.else);
+      }
     }
   }
 
@@ -268,6 +448,19 @@ export class SchemaValidator {
       }
     }
 
+    // propertyNames (v0.5.0)
+    if (schema.propertyNames) {
+      for (const key of Object.keys(value)) {
+        const subValidator = new SchemaValidator();
+        const result = subValidator.validate(key, schema.propertyNames);
+        if (!result.valid) {
+          this.addError('propertyNames', `Property name "${key}" is invalid`, {
+            actual: key,
+          });
+        }
+      }
+    }
+
     // properties
     if (schema.properties) {
       for (const [key, propSchema] of Object.entries(schema.properties)) {
@@ -279,11 +472,42 @@ export class SchemaValidator {
       }
     }
 
+    // patternProperties (v0.5.0)
+    if (schema.patternProperties) {
+      for (const [pattern, propSchema] of Object.entries(schema.patternProperties)) {
+        try {
+          const regex = new RegExp(pattern);
+          for (const [key, propValue] of Object.entries(value)) {
+            if (regex.test(key)) {
+              this.path.push(key);
+              this.validateValue(propValue, propSchema);
+              this.path.pop();
+            }
+          }
+        } catch {
+          // Invalid regex, skip
+        }
+      }
+    }
+
     // additionalProperties
-    if (schema.additionalProperties === false && schema.properties) {
-      const definedKeys = new Set(Object.keys(schema.properties));
+    if (schema.additionalProperties === false) {
+      const definedKeys = new Set(Object.keys(schema.properties || {}));
+      const patternRegexes = Object.keys(schema.patternProperties || {}).map(
+        (p) => {
+          try {
+            return new RegExp(p);
+          } catch {
+            return null;
+          }
+        }
+      );
+
       for (const key of Object.keys(value)) {
-        if (!definedKeys.has(key)) {
+        if (definedKeys.has(key)) continue;
+
+        const matchesPattern = patternRegexes.some((r) => r && r.test(key));
+        if (!matchesPattern) {
           this.addError('additionalProperties', `Unknown property: ${key}`, {
             actual: key,
           });
@@ -291,8 +515,21 @@ export class SchemaValidator {
       }
     } else if (typeof schema.additionalProperties === 'object') {
       const definedKeys = new Set(Object.keys(schema.properties || {}));
+      const patternRegexes = Object.keys(schema.patternProperties || {}).map(
+        (p) => {
+          try {
+            return new RegExp(p);
+          } catch {
+            return null;
+          }
+        }
+      );
+
       for (const [key, propValue] of Object.entries(value)) {
-        if (!definedKeys.has(key)) {
+        if (definedKeys.has(key)) continue;
+
+        const matchesPattern = patternRegexes.some((r) => r && r.test(key));
+        if (!matchesPattern) {
           this.path.push(key);
           this.validateValue(propValue, schema.additionalProperties);
           this.path.pop();
@@ -338,6 +575,24 @@ export class SchemaValidator {
           break;
         }
         seen.add(serialized);
+      }
+    }
+
+    // contains (v0.5.0)
+    if (schema.contains) {
+      let hasMatch = false;
+      for (const item of value) {
+        const subValidator = new SchemaValidator();
+        const result = subValidator.validate(item, schema.contains);
+        if (result.valid) {
+          hasMatch = true;
+          break;
+        }
+      }
+      if (!hasMatch) {
+        this.addError('contains', 'Array must contain at least one matching item', {
+          expected: schema.contains,
+        });
       }
     }
 

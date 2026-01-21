@@ -280,4 +280,153 @@ describe('IncrementalLoot', () => {
       });
     });
   });
+
+  // ============================================================================
+  // v0.4.0 - New Features
+  // ============================================================================
+
+  describe('v0.4.0 - progress callbacks', () => {
+    it('should call onProgress with progress info', () => {
+      const onProgress = vi.fn();
+      const parser = new IncrementalLoot({
+        fields: ['a', 'b'],
+        onProgress,
+      });
+
+      parser.addChunk('{"a": 1, "b": 2}');
+
+      expect(onProgress).toHaveBeenCalled();
+      const lastCall = onProgress.mock.calls[onProgress.mock.calls.length - 1][0];
+      expect(lastCall.bytesProcessed).toBeGreaterThan(0);
+      expect(lastCall.fieldsCompleted).toContain('a');
+      expect(lastCall.fieldsCompleted).toContain('b');
+    });
+
+    it('should estimate progress based on tracked fields', () => {
+      const onProgress = vi.fn();
+      const parser = new IncrementalLoot({
+        fields: ['a', 'b', 'c', 'd'],
+        onProgress,
+      });
+
+      parser.addChunk('{"a": 1, "b": 2,');
+
+      const calls = onProgress.mock.calls;
+      const lastProgress = calls[calls.length - 1][0];
+
+      // 2 of 4 fields complete = 0.5
+      expect(lastProgress.estimatedProgress).toBe(0.5);
+    });
+
+    it('should call onFieldStart when field begins', () => {
+      const onFieldStart = vi.fn();
+      const parser = new IncrementalLoot({
+        fields: ['dialogue'],
+        onFieldStart,
+      });
+
+      parser.addChunk('{"dialogue": "Hello"');
+
+      expect(onFieldStart).toHaveBeenCalledWith('dialogue');
+    });
+  });
+
+  describe('v0.4.0 - error recovery', () => {
+    it('should recover from malformed JSON with repair', () => {
+      const onRecovery = vi.fn();
+      const parser = new IncrementalLoot({
+        fields: ['value'],
+        recover: true,
+        onRecovery,
+      });
+
+      // Trailing comma should be repaired
+      parser.addChunk('{"value": 42,}');
+
+      expect(parser.getResult()).toEqual({ value: 42 });
+    });
+
+    it('should return partial result on recovery failure', () => {
+      const onRecovery = vi.fn();
+      const onComplete = vi.fn();
+      const parser = new IncrementalLoot({
+        fields: ['valid', 'invalid'],
+        recover: true,
+        onRecovery,
+        onComplete,
+      });
+
+      parser.addChunk('{"valid": 123, "invalid":');
+
+      // Force finalization with incomplete JSON
+      const partial = parser.addChunk('}').getPartialResult();
+
+      expect(partial).toHaveProperty('valid', 123);
+    });
+  });
+
+  describe('v0.4.0 - buffer management', () => {
+    it('should report buffer stats', () => {
+      const parser = new IncrementalLoot();
+
+      parser.addChunk('{"test": "value"}');
+
+      const stats = parser.getStats();
+      expect(stats.bytesProcessed).toBe(17);
+      expect(stats.bufferSize).toBe(17);
+      expect(stats.isComplete).toBe(true);
+    });
+
+    it('should compact buffer when exceeding maxBufferSize', () => {
+      const parser = new IncrementalLoot({
+        maxBufferSize: 50, // Small buffer for testing
+      });
+
+      // Add data that will exceed buffer
+      parser.addChunk('{"field1": "value1", "field2": "value2", "field3": "value3"}');
+
+      // Buffer should still work correctly
+      expect(parser.getResult()).toEqual({
+        field1: 'value1',
+        field2: 'value2',
+        field3: 'value3',
+      });
+    });
+
+    it('should reset stats on reset()', () => {
+      const parser = new IncrementalLoot();
+
+      parser.addChunk('{"a": 1}');
+      expect(parser.getStats().bytesProcessed).toBeGreaterThan(0);
+
+      parser.reset();
+
+      expect(parser.getStats().bytesProcessed).toBe(0);
+      expect(parser.getStats().bufferSize).toBe(0);
+    });
+  });
+
+  describe('v0.4.0 - combined callbacks', () => {
+    it('should call all callbacks in correct order', () => {
+      const callOrder: string[] = [];
+
+      const parser = new IncrementalLoot({
+        fields: ['dialogue'],
+        onFieldStart: () => callOrder.push('fieldStart'),
+        onFieldComplete: () => callOrder.push('fieldComplete'),
+        onProgress: () => callOrder.push('progress'),
+        onComplete: () => callOrder.push('complete'),
+      });
+
+      parser.addChunk('{"dialogue": "Hello"}');
+
+      expect(callOrder).toContain('fieldStart');
+      expect(callOrder).toContain('fieldComplete');
+      expect(callOrder).toContain('progress');
+      expect(callOrder).toContain('complete');
+
+      // fieldStart should come before fieldComplete
+      expect(callOrder.indexOf('fieldStart')).toBeLessThan(callOrder.indexOf('fieldComplete'));
+    });
+  });
 });

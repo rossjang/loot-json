@@ -1,11 +1,26 @@
 /**
- * 💎 loot-json IncrementalLoot
+ * 💎 loot-json IncrementalLoot (v0.4.0)
  * Streaming/incremental JSON parser for LLM outputs
+ *
+ * Features:
+ * - Memory-efficient buffer management
+ * - Enhanced callback system
+ * - Error recovery
+ * - Progress tracking
  */
 
 import { repairJson } from '../repairs';
 import { FieldTracker } from './FieldTracker';
-import { IncrementalLootOptions, IncrementalResult, ParserState } from './types';
+import {
+  IncrementalLootOptions,
+  IncrementalResult,
+  ParserState,
+  ProgressInfo,
+  RecoveryInfo,
+} from './types';
+
+// Default max buffer size: 64KB
+const DEFAULT_MAX_BUFFER_SIZE = 64 * 1024;
 
 /**
  * Incremental JSON parser for streaming LLM responses
@@ -19,6 +34,9 @@ import { IncrementalLootOptions, IncrementalResult, ParserState } from './types'
  *   fields: ['dialogue', 'emotion'],
  *   onFieldComplete: (field, value) => {
  *     if (field === 'dialogue') startTTS(value);
+ *   },
+ *   onProgress: (info) => {
+ *     console.log(`Progress: ${info.bytesProcessed} bytes`);
  *   },
  * });
  *
@@ -37,10 +55,17 @@ export class IncrementalLoot<T = unknown> {
   private state: ParserState;
   private result: T | null = null;
   private processedIndex: number = 0;
+  private bytesProcessed: number = 0;
+  private jsonStartPosition: number = -1;
+  private lastCompactPosition: number = 0;
+  private recoveryAttempts: number = 0;
+  private maxRecoveryAttempts: number = 3;
 
   constructor(options: IncrementalLootOptions = {}) {
     this.options = {
       repair: true,
+      maxBufferSize: DEFAULT_MAX_BUFFER_SIZE,
+      recover: false,
       ...options,
     };
     this.fieldTracker = new FieldTracker(options.fields);
@@ -52,7 +77,17 @@ export class IncrementalLoot<T = unknown> {
    */
   addChunk(chunk: string): IncrementalResult<T> {
     this.buffer += chunk;
+    this.bytesProcessed += chunk.length;
+
+    // Check buffer size and compact if needed
+    this.maybeCompactBuffer();
+
+    // Process the buffer
     this.processBuffer();
+
+    // Report progress
+    this.reportProgress();
+
     return this.createResult();
   }
 
@@ -67,6 +102,23 @@ export class IncrementalLoot<T = unknown> {
   }
 
   /**
+   * Get current parsing statistics
+   */
+  getStats(): {
+    bytesProcessed: number;
+    bufferSize: number;
+    fieldsCompleted: number;
+    isComplete: boolean;
+  } {
+    return {
+      bytesProcessed: this.bytesProcessed,
+      bufferSize: this.buffer.length,
+      fieldsCompleted: this.fieldTracker.getCompletedFieldNames().length,
+      isComplete: this.state.jsonComplete,
+    };
+  }
+
+  /**
    * Reset the parser state for reuse
    */
   reset(): void {
@@ -75,10 +127,90 @@ export class IncrementalLoot<T = unknown> {
     this.fieldTracker.reset();
     this.result = null;
     this.processedIndex = 0;
+    this.bytesProcessed = 0;
+    this.jsonStartPosition = -1;
+    this.lastCompactPosition = 0;
+    this.recoveryAttempts = 0;
   }
 
   // ============================================================================
-  // Private Methods
+  // Buffer Management (v0.4.0)
+  // ============================================================================
+
+  private maybeCompactBuffer(): void {
+    const maxSize = this.options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
+
+    if (this.buffer.length <= maxSize) {
+      return;
+    }
+
+    // Find safe compaction point (after completed fields)
+    const safePoint = this.findSafeCompactionPoint();
+
+    if (safePoint > this.lastCompactPosition) {
+      // Keep content from safePoint onwards
+      const discarded = safePoint - this.lastCompactPosition;
+      this.buffer = this.buffer.substring(safePoint);
+      this.processedIndex = Math.max(0, this.processedIndex - safePoint);
+      this.jsonStartPosition = Math.max(-1, this.jsonStartPosition - safePoint);
+      this.lastCompactPosition = 0;
+
+      // Adjust state positions
+      if (this.state.keyStart !== -1) {
+        this.state.keyStart -= safePoint;
+      }
+      if (this.state.valueStart !== -1) {
+        this.state.valueStart -= safePoint;
+      }
+
+      // Log compaction if debugging
+      if (discarded > 0 && this.options.onProgress) {
+        // Compaction happened, but we don't interrupt progress
+      }
+    }
+  }
+
+  private findSafeCompactionPoint(): number {
+    // Don't compact if we haven't started JSON
+    if (this.jsonStartPosition === -1) {
+      return 0;
+    }
+
+    // Don't compact past active key/value
+    const minKeep = Math.min(
+      this.state.keyStart === -1 ? this.buffer.length : this.state.keyStart,
+      this.state.valueStart === -1 ? this.buffer.length : this.state.valueStart
+    );
+
+    // Keep at least from JSON start
+    return Math.min(minKeep, this.jsonStartPosition);
+  }
+
+  // ============================================================================
+  // Progress Reporting (v0.4.0)
+  // ============================================================================
+
+  private reportProgress(): void {
+    if (!this.options.onProgress) return;
+
+    const progress: ProgressInfo = {
+      bytesProcessed: this.bytesProcessed,
+      bytesBuffered: this.buffer.length,
+      fieldsCompleted: this.fieldTracker.getCompletedFieldNames(),
+    };
+
+    // Estimate progress based on completed tracked fields
+    const trackedFields = this.options.fields;
+    if (trackedFields && trackedFields.length > 0) {
+      const completedCount = progress.fieldsCompleted.length;
+      progress.estimatedProgress = completedCount / trackedFields.length;
+    }
+
+    this.options.onProgress(progress);
+  }
+
+  // ============================================================================
+  // State Management
   // ============================================================================
 
   private createInitialState(): ParserState {
@@ -155,7 +287,7 @@ export class IncrementalLoot<T = unknown> {
   }
 
   private handleQuote(position: number): void {
-    const { state } = this;
+    const { state, options } = this;
 
     if (!state.inString) {
       // Starting a string
@@ -171,8 +303,14 @@ export class IncrementalLoot<T = unknown> {
 
       if (state.keyStart !== -1 && state.valueStart === -1) {
         // Just finished reading a key
-        state.currentKey = this.buffer.slice(state.keyStart + 1, position);
+        const key = this.buffer.slice(state.keyStart + 1, position);
+        state.currentKey = key;
         state.keyStart = -1;
+
+        // Notify field start
+        if (options.onFieldStart && this.fieldTracker.isTracking(key)) {
+          options.onFieldStart(key);
+        }
       } else if (state.valueStart !== -1 && state.valueDepth === 0) {
         // Finished reading a string value at top level
         this.tryCompleteField(position + 1);
@@ -180,11 +318,12 @@ export class IncrementalLoot<T = unknown> {
     }
   }
 
-  private handleOpenBrace(_position: number): void {
+  private handleOpenBrace(position: number): void {
     const { state } = this;
 
     if (!state.jsonStarted) {
       state.jsonStarted = true;
+      this.jsonStartPosition = position;
     }
 
     state.depth++;
@@ -193,7 +332,6 @@ export class IncrementalLoot<T = unknown> {
     if (state.depth >= 2 && state.valueStart !== -1) {
       state.valueDepth++;
     } else if (state.depth === 2 && state.currentKey && state.valueStart === -1) {
-      // This shouldn't happen normally, but handle it
       state.valueDepth = 1;
     }
   }
@@ -297,7 +435,6 @@ export class IncrementalLoot<T = unknown> {
 
     // Try to parse the value
     try {
-      // Try direct parse first
       let value: unknown;
       try {
         value = JSON.parse(valueStr);
@@ -317,11 +454,56 @@ export class IncrementalLoot<T = unknown> {
       if (options.onFieldComplete) {
         options.onFieldComplete(key, value);
       }
-    } catch {
-      // Value not yet complete or invalid, continue buffering
+
+      // Send final value chunk
+      if (options.onValueChunk) {
+        options.onValueChunk(key, JSON.stringify(value), true);
+      }
+    } catch (error) {
+      // Value not yet complete or invalid
+      if (options.recover && this.recoveryAttempts < this.maxRecoveryAttempts) {
+        this.attemptRecovery(key, valueStr, error as Error);
+      }
     }
 
     this.resetFieldState();
+  }
+
+  // ============================================================================
+  // Error Recovery (v0.4.0)
+  // ============================================================================
+
+  private attemptRecovery(key: string, valueStr: string, _error: Error): void {
+    this.recoveryAttempts++;
+
+    const recoveryInfo: RecoveryInfo = {
+      strategy: 'repair',
+      position: this.state.valueStart,
+      description: `Attempting to recover field: ${key}`,
+      success: false,
+    };
+
+    try {
+      // Strategy 1: Try repair
+      const repaired = repairJson(valueStr);
+      const value = JSON.parse(repaired);
+
+      this.fieldTracker.completeField(key, value);
+      recoveryInfo.success = true;
+      recoveryInfo.description = `Recovered field ${key} using repair`;
+
+      if (this.options.onFieldComplete) {
+        this.options.onFieldComplete(key, value);
+      }
+    } catch {
+      // Strategy 2: Skip this field
+      recoveryInfo.strategy = 'skip_field';
+      recoveryInfo.description = `Skipped field ${key} after failed recovery`;
+    }
+
+    if (this.options.onRecovery) {
+      this.options.onRecovery(recoveryInfo);
+    }
   }
 
   private resetFieldState(): void {
@@ -358,6 +540,28 @@ export class IncrementalLoot<T = unknown> {
         options.onComplete(this.result);
       }
     } catch (error) {
+      if (options.recover) {
+        // Try partial result recovery
+        const partial = this.fieldTracker.getAllCompleted();
+        if (Object.keys(partial).length > 0) {
+          this.result = partial as T;
+
+          if (options.onRecovery) {
+            options.onRecovery({
+              strategy: 'partial_result',
+              position: 0,
+              description: 'Recovered partial result from completed fields',
+              success: true,
+            });
+          }
+
+          if (options.onComplete) {
+            options.onComplete(this.result);
+          }
+          return;
+        }
+      }
+
       if (options.onError) {
         options.onError(error as Error);
       }

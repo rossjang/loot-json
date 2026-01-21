@@ -18,10 +18,15 @@ export type SchemaType = 'string' | 'number' | 'integer' | 'boolean' | 'object' 
 export type StringFormat = 'date' | 'date-time' | 'email' | 'uri' | 'uuid';
 
 /**
- * JSON Schema subset for loot-json
- * Based on JSON Schema Draft-07 (simplified)
+ * JSON Schema subset for loot-json (v0.5.0)
+ * Based on JSON Schema Draft-07 (extended)
  */
 export interface LootSchema {
+  // Meta
+  $id?: string;
+  $ref?: string;
+  definitions?: Record<string, LootSchema>;
+
   // Type
   type?: SchemaType | SchemaType[];
 
@@ -29,12 +34,15 @@ export interface LootSchema {
   properties?: Record<string, LootSchema>;
   required?: string[];
   additionalProperties?: boolean | LootSchema;
+  patternProperties?: Record<string, LootSchema>;
+  propertyNames?: LootSchema;
 
   // Array
   items?: LootSchema | LootSchema[];
   minItems?: number;
   maxItems?: number;
   uniqueItems?: boolean;
+  contains?: LootSchema;
 
   // String
   minLength?: number;
@@ -52,6 +60,17 @@ export interface LootSchema {
   // Enum
   enum?: unknown[];
   const?: unknown;
+
+  // Composition (v0.5.0)
+  allOf?: LootSchema[];
+  anyOf?: LootSchema[];
+  oneOf?: LootSchema[];
+  not?: LootSchema;
+
+  // Conditional (v0.5.0)
+  if?: LootSchema;
+  then?: LootSchema;
+  else?: LootSchema;
 }
 
 // ============================================================================

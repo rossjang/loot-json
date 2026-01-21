@@ -26,6 +26,10 @@ export interface RepairLog {
   type: RepairType;
   /** Character position where repair was applied (approximate) */
   position?: number;
+  /** Line number (1-based) where repair was applied */
+  line?: number;
+  /** Column number (1-based) where repair was applied */
+  column?: number;
   /** Human-readable description of the repair */
   description: string;
   /** Whether the repair was successful */
@@ -41,6 +45,53 @@ export interface RepairResult {
   /** List of repairs that were applied */
   repairs: RepairLog[];
 }
+
+// ============================================================================
+// Repair Configuration (v0.2.0)
+// ============================================================================
+
+/**
+ * Configuration for which repair rules to apply
+ */
+export interface RepairRules {
+  /** Remove trailing commas before } or ] @default true */
+  trailingComma?: boolean;
+  /** Convert single quotes to double quotes @default true */
+  singleQuotes?: boolean;
+  /** Remove single-line comments (//) @default true */
+  singleLineComments?: boolean;
+  /** Remove multi-line comments @default true */
+  multiLineComments?: boolean;
+  /** Quote unquoted property names @default true */
+  unquotedKeys?: boolean;
+  /** Replace undefined, NaN, Infinity with null @default true */
+  invalidValues?: boolean;
+  /** Escape unescaped newlines in strings @default true */
+  unescapedNewlines?: boolean;
+}
+
+/**
+ * Options for repairJson function
+ */
+export interface RepairOptions {
+  /** Whether to track and return repair logs @default false */
+  trackRepairs?: boolean;
+  /** Which repair rules to apply @default all enabled */
+  rules?: RepairRules;
+}
+
+/**
+ * Default repair rules - all enabled
+ */
+export const DEFAULT_REPAIR_RULES: Required<RepairRules> = {
+  trailingComma: true,
+  singleQuotes: true,
+  singleLineComments: true,
+  multiLineComments: true,
+  unquotedKeys: true,
+  invalidValues: true,
+  unescapedNewlines: true,
+};
 
 // ============================================================================
 // Loot Options

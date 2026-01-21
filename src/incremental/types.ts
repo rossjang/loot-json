@@ -52,9 +52,36 @@ export interface IncrementalLootOptions {
   repair?: boolean;
 
   /**
+   * Maximum buffer size in bytes before compaction
+   * @default 65536 (64KB)
+   */
+  maxBufferSize?: number;
+
+  /**
+   * Whether to attempt error recovery
+   * @default false
+   */
+  recover?: boolean;
+
+  /**
    * Callback when a tracked field is complete
    */
   onFieldComplete?: (field: string, value: unknown) => void;
+
+  /**
+   * Callback when a field starts being parsed
+   */
+  onFieldStart?: (field: string) => void;
+
+  /**
+   * Callback for value chunks during streaming (for large strings)
+   */
+  onValueChunk?: (field: string, chunk: string, complete: boolean) => void;
+
+  /**
+   * Callback with progress information
+   */
+  onProgress?: (progress: ProgressInfo) => void;
 
   /**
    * Callback when the entire JSON is complete
@@ -65,7 +92,53 @@ export interface IncrementalLootOptions {
    * Callback on parsing error
    */
   onError?: (error: Error) => void;
+
+  /**
+   * Callback when error recovery is attempted
+   */
+  onRecovery?: (info: RecoveryInfo) => void;
 }
+
+// ============================================================================
+// Progress & Recovery (v0.4.0)
+// ============================================================================
+
+/**
+ * Progress information during parsing
+ */
+export interface ProgressInfo {
+  /** Number of bytes processed */
+  bytesProcessed: number;
+  /** Total bytes buffered */
+  bytesBuffered: number;
+  /** List of completed field names */
+  fieldsCompleted: string[];
+  /** Estimated progress (0-1) if structure is known */
+  estimatedProgress?: number;
+}
+
+/**
+ * Information about error recovery
+ */
+export interface RecoveryInfo {
+  /** The strategy used for recovery */
+  strategy: RecoveryStrategy;
+  /** Position where recovery was attempted */
+  position: number;
+  /** Description of what was recovered */
+  description: string;
+  /** Whether recovery was successful */
+  success: boolean;
+}
+
+/**
+ * Recovery strategies
+ */
+export type RecoveryStrategy =
+  | 'skip_value'      // Skip current value and continue
+  | 'skip_field'      // Skip current field and continue
+  | 'repair'          // Apply repair rules
+  | 'partial_result'; // Return what we have
 
 // ============================================================================
 // Results

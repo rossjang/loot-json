@@ -1,11 +1,26 @@
 /**
- * 💎 loot-json field extraction
+ * 💎 loot-json field extraction (v0.3.0)
  * Extract specific fields from JSON without parsing the entire document
+ *
+ * Features:
+ * - Array index support: items[0], items[-1]
+ * - Wildcard patterns: items[*], **.id
+ * - Lazy parsing for performance
  */
 
 import { findJsonCandidates } from './extractors';
 import { repairJson } from './repairs';
 import { LootError, LootFieldOptions } from './types';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+type PathSegment =
+  | { type: 'key'; value: string }
+  | { type: 'index'; value: number }
+  | { type: 'wildcard' }
+  | { type: 'recursive' }; // **
 
 // ============================================================================
 // Main Function
@@ -15,7 +30,12 @@ import { LootError, LootFieldOptions } from './types';
  * Extract a specific field from JSON text without parsing the entire document
  *
  * @param text - Raw text containing JSON
- * @param path - Field path (supports dot notation for nested fields, e.g., 'user.profile.name')
+ * @param path - Field path with support for:
+ *   - Dot notation: 'user.profile.name'
+ *   - Bracket notation: 'data["special.key"]'
+ *   - Array index: 'items[0]', 'items[-1]' (negative = from end)
+ *   - Wildcards: 'items[*].name' (all array items)
+ *   - Recursive: '**.id' (find at any depth)
  * @param options - Extraction options
  * @returns The extracted field value or undefined if not found
  *
@@ -27,11 +47,15 @@ import { LootError, LootFieldOptions } from './types';
  * // Nested field
  * const city = lootField(text, 'user.address.city');
  *
- * // With type
- * const age = lootField<number>(text, 'age');
+ * // Array index
+ * const first = lootField(text, 'items[0]');
+ * const last = lootField(text, 'items[-1]');
  *
- * // Get all occurrences
- * const allNames = lootField(text, 'name', { all: true });
+ * // Wildcard - returns array of all matching values
+ * const allNames = lootField(text, 'users[*].name');
+ *
+ * // Recursive - find 'id' at any depth
+ * const allIds = lootField(text, '**.id');
  * ```
  */
 export function lootField<T = unknown>(
@@ -47,85 +71,80 @@ export function lootField<T = unknown>(
     throw new LootError('Text and path are required', 'EMPTY_INPUT');
   }
 
+  // Parse the path
+  const segments = parsePath(path);
+  const hasWildcard = segments.some((s) => s.type === 'wildcard' || s.type === 'recursive');
+
   // Find JSON candidates
   const candidates = findJsonCandidates(text);
   const results: T[] = [];
 
-  for (const candidate of candidates) {
+  // For wildcard patterns, only use the first (largest) JSON candidate to avoid duplicates
+  const candidatesToSearch = hasWildcard && !all ? candidates.slice(0, 1) : candidates;
+
+  for (const candidate of candidatesToSearch) {
     // Repair if needed
     const json = repair ? safeRepair(candidate) : candidate;
 
-    // Extract field value
-    const value = extractFieldValue<T>(json, path);
-
-    if (value !== undefined) {
-      if (!all) return value;
-      results.push(value);
+    // Extract field value(s)
+    if (hasWildcard) {
+      // Wildcard extraction returns multiple values
+      const values = extractWithWildcard<T>(json, segments);
+      results.push(...values);
+    } else {
+      // Normal extraction
+      const value = extractFieldValue<T>(json, segments);
+      if (value !== undefined) {
+        if (!all && !hasWildcard) return value;
+        results.push(value);
+      }
     }
+  }
+
+  // Return results based on options
+  if (hasWildcard) {
+    return results.length > 0 ? results : (silent ? undefined : throwNotFound(path));
   }
 
   if (all && results.length > 0) {
     return results;
   }
 
+  if (results.length > 0) {
+    return results[0];
+  }
+
   if (silent) return undefined;
   throw new LootError(`Field '${path}' not found`, 'FIELD_NOT_FOUND');
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/**
- * Safely repair JSON, returning original if repair fails
- */
-function safeRepair(json: string): string {
-  try {
-    return repairJson(json);
-  } catch {
-    return json;
-  }
+function throwNotFound(path: string): never {
+  throw new LootError(`Field '${path}' not found`, 'FIELD_NOT_FOUND');
 }
 
-/**
- * Extract a field value from JSON string without full parsing
- */
-function extractFieldValue<T>(json: string, path: string): T | undefined {
-  const keys = parsePath(path);
-  let current = json;
-
-  for (const key of keys) {
-    const result = findKeyValue(current, key);
-    if (result === undefined) return undefined;
-    current = result;
-  }
-
-  // Parse the final value
-  try {
-    return JSON.parse(current) as T;
-  } catch {
-    // Try with repair
-    try {
-      const repaired = repairJson(current);
-      return JSON.parse(repaired) as T;
-    } catch {
-      return undefined;
-    }
-  }
-}
+// ============================================================================
+// Path Parsing
+// ============================================================================
 
 /**
- * Parse a field path into keys
- * Supports: 'a.b.c' and 'a["b.c"].d' for keys with dots
+ * Parse a field path into segments
+ * Supports: 'a.b.c', 'a["b.c"].d', 'a[0]', 'a[-1]', 'a[*]', '**.id'
  */
-function parsePath(path: string): string[] {
-  const keys: string[] = [];
+function parsePath(path: string): PathSegment[] {
+  const segments: PathSegment[] = [];
   let current = '';
   let inBracket = false;
   let inQuote = false;
   let quoteChar = '';
+  let i = 0;
 
-  for (let i = 0; i < path.length; i++) {
+  // Check for recursive wildcard at start
+  if (path.startsWith('**.')) {
+    segments.push({ type: 'recursive' });
+    i = 3;
+  }
+
+  while (i < path.length) {
     const char = path[i];
 
     if (inBracket) {
@@ -140,7 +159,8 @@ function parsePath(path: string): string[] {
         quoteChar = char;
       } else if (char === ']') {
         if (current) {
-          keys.push(current);
+          const segment = parseBracketContent(current);
+          segments.push(segment);
           current = '';
         }
         inBracket = false;
@@ -149,25 +169,213 @@ function parsePath(path: string): string[] {
       }
     } else if (char === '[') {
       if (current) {
-        keys.push(current);
+        segments.push({ type: 'key', value: current });
         current = '';
       }
       inBracket = true;
     } else if (char === '.') {
       if (current) {
-        keys.push(current);
+        segments.push({ type: 'key', value: current });
         current = '';
+      }
+      // Check for recursive wildcard
+      if (path.substring(i).startsWith('.**')) {
+        segments.push({ type: 'recursive' });
+        i += 3;
+        continue;
       }
     } else {
       current += char;
     }
+
+    i++;
   }
 
   if (current) {
-    keys.push(current);
+    segments.push({ type: 'key', value: current });
   }
 
-  return keys;
+  return segments;
+}
+
+/**
+ * Parse content inside brackets
+ */
+function parseBracketContent(content: string): PathSegment {
+  if (content === '*') {
+    return { type: 'wildcard' };
+  }
+
+  // Try to parse as number (index)
+  const num = parseInt(content, 10);
+  if (!isNaN(num)) {
+    return { type: 'index', value: num };
+  }
+
+  // Otherwise treat as key
+  return { type: 'key', value: content };
+}
+
+// ============================================================================
+// Field Extraction
+// ============================================================================
+
+/**
+ * Safely repair JSON, returning original if repair fails
+ */
+function safeRepair(json: string): string {
+  try {
+    return repairJson(json);
+  } catch {
+    return json;
+  }
+}
+
+/**
+ * Extract a field value from JSON string using path segments
+ */
+function extractFieldValue<T>(json: string, segments: PathSegment[]): T | undefined {
+  let current = json;
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+
+    switch (segment.type) {
+      case 'key':
+        const keyResult = findKeyValue(current, segment.value);
+        if (keyResult === undefined) return undefined;
+        current = keyResult;
+        break;
+
+      case 'index':
+        const indexResult = findArrayIndex(current, segment.value);
+        if (indexResult === undefined) return undefined;
+        current = indexResult;
+        break;
+
+      default:
+        // Wildcards handled separately
+        return undefined;
+    }
+  }
+
+  // Parse the final value
+  return parseValue<T>(current);
+}
+
+/**
+ * Extract with wildcard support
+ */
+function extractWithWildcard<T>(json: string, segments: PathSegment[]): T[] {
+  const results: T[] = [];
+
+  function extract(current: string, segmentIndex: number): void {
+    if (segmentIndex >= segments.length) {
+      const value = parseValue<T>(current);
+      if (value !== undefined) {
+        results.push(value);
+      }
+      return;
+    }
+
+    const segment = segments[segmentIndex];
+
+    switch (segment.type) {
+      case 'key':
+        const keyResult = findKeyValue(current, segment.value);
+        if (keyResult !== undefined) {
+          extract(keyResult, segmentIndex + 1);
+        }
+        break;
+
+      case 'index':
+        const indexResult = findArrayIndex(current, segment.value);
+        if (indexResult !== undefined) {
+          extract(indexResult, segmentIndex + 1);
+        }
+        break;
+
+      case 'wildcard':
+        // Iterate all array elements
+        const elements = extractAllArrayElements(current);
+        for (const element of elements) {
+          extract(element, segmentIndex + 1);
+        }
+        break;
+
+      case 'recursive':
+        // Find matching key at any depth
+        const nextSegment = segments[segmentIndex + 1];
+        if (nextSegment && nextSegment.type === 'key') {
+          findAllMatchingUnique(current, nextSegment.value, segmentIndex + 2);
+        }
+        break;
+    }
+  }
+
+  function findAllMatchingUnique(text: string, key: string, nextIndex: number): void {
+    // Parse the JSON first to traverse it properly
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      try {
+        parsed = JSON.parse(repairJson(text));
+      } catch {
+        return;
+      }
+    }
+
+    // Recursively find all matching keys
+    function findInObject(obj: unknown): void {
+      if (obj === null || typeof obj !== 'object') {
+        return;
+      }
+
+      if (Array.isArray(obj)) {
+        for (const item of obj) {
+          findInObject(item);
+        }
+      } else {
+        const record = obj as Record<string, unknown>;
+        for (const [k, v] of Object.entries(record)) {
+          if (k === key) {
+            if (nextIndex >= segments.length) {
+              results.push(v as T);
+            } else {
+              // Continue extraction on the value
+              const valueStr = JSON.stringify(v);
+              extract(valueStr, nextIndex);
+            }
+          }
+          // Continue searching in nested objects
+          findInObject(v);
+        }
+      }
+    }
+
+    findInObject(parsed);
+  }
+
+  extract(json, 0);
+  return results;
+}
+
+/**
+ * Parse a JSON value string
+ */
+function parseValue<T>(valueStr: string): T | undefined {
+  try {
+    return JSON.parse(valueStr) as T;
+  } catch {
+    // Try with repair
+    try {
+      const repaired = repairJson(valueStr);
+      return JSON.parse(repaired) as T;
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 /**
@@ -184,6 +392,68 @@ function findKeyValue(json: string, key: string): string | undefined {
   const valueStart = match.index + match[0].length;
   return extractValue(json, valueStart);
 }
+
+/**
+ * Find array element by index (supports negative indices)
+ */
+function findArrayIndex(json: string, index: number): string | undefined {
+  // Find the array start
+  const arrayStart = json.indexOf('[');
+  if (arrayStart === -1) return undefined;
+
+  const elements = extractAllArrayElements(json);
+
+  // Handle negative indices
+  const actualIndex = index < 0 ? elements.length + index : index;
+
+  if (actualIndex < 0 || actualIndex >= elements.length) {
+    return undefined;
+  }
+
+  return elements[actualIndex];
+}
+
+/**
+ * Extract all elements from an array
+ */
+function extractAllArrayElements(json: string): string[] {
+  const elements: string[] = [];
+
+  // Find array start
+  let start = json.indexOf('[');
+  if (start === -1) return elements;
+
+  start++; // Skip [
+
+  while (start < json.length) {
+    // Skip whitespace
+    while (start < json.length && /\s/.test(json[start])) {
+      start++;
+    }
+
+    if (start >= json.length || json[start] === ']') break;
+
+    // Extract the element
+    const element = extractValue(json, start);
+    if (element === undefined) break;
+
+    elements.push(element);
+
+    // Move past the element
+    start += element.length;
+
+    // Skip whitespace and comma
+    while (start < json.length && /[\s,]/.test(json[start])) {
+      start++;
+    }
+  }
+
+  return elements;
+}
+
+// ============================================================================
+// Value Extraction Helpers
+// ============================================================================
 
 /**
  * Extract a JSON value starting at the given position

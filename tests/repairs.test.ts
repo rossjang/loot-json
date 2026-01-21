@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { repairJson } from '../src';
+import { repairJson, StreamingRepair } from '../src';
 
 describe('repairJson', () => {
   describe('trailing commas', () => {
@@ -155,6 +155,167 @@ describe('repairJson', () => {
         value: null,
         items: [1, 2, 3],
       });
+    });
+  });
+
+  // ============================================================================
+  // v0.2.0 - New Features
+  // ============================================================================
+
+  describe('v0.2.0 - enhanced repair logging', () => {
+    it('should include line and column in repair logs', () => {
+      const input = '{\n  "key": "value",\n}';
+      const result = repairJson(input, { trackRepairs: true });
+
+      expect(result.text).toBe('{\n  "key": "value"\n}');
+      const trailingRepair = result.repairs.find((r) => r.type === 'trailing_comma');
+      expect(trailingRepair).toBeDefined();
+      expect(trailingRepair?.line).toBeDefined();
+      expect(trailingRepair?.column).toBeDefined();
+    });
+
+    it('should track repairs with options object', () => {
+      const result = repairJson('{"key": "value",}', { trackRepairs: true });
+      expect(result.text).toBe('{"key": "value"}');
+      expect(result.repairs.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('v0.2.0 - configurable rules', () => {
+    it('should allow disabling trailing comma repair', () => {
+      const input = '{"key": "value",}';
+      const result = repairJson(input, {
+        rules: { trailingComma: false },
+      });
+      expect(result).toBe('{"key": "value",}');
+    });
+
+    it('should allow disabling single quote repair', () => {
+      const input = "{'key': 'value'}";
+      const result = repairJson(input, {
+        rules: { singleQuotes: false },
+      });
+      expect(result).toBe("{'key': 'value'}");
+    });
+
+    it('should allow disabling comment removal', () => {
+      const input = '{"key": "value" // comment\n}';
+      const result = repairJson(input, {
+        rules: { singleLineComments: false },
+      });
+      expect(result).toContain('// comment');
+    });
+
+    it('should allow disabling multi-line comment removal', () => {
+      const input = '{"key": "value" /* comment */}';
+      const result = repairJson(input, {
+        rules: { multiLineComments: false },
+      });
+      expect(result).toContain('/* comment */');
+    });
+
+    it('should allow disabling unquoted key repair', () => {
+      const input = '{key: "value"}';
+      const result = repairJson(input, {
+        rules: { unquotedKeys: false },
+      });
+      expect(result).toBe('{key: "value"}');
+    });
+
+    it('should allow disabling invalid value repair', () => {
+      const input = '{"value": undefined}';
+      const result = repairJson(input, {
+        rules: { invalidValues: false },
+      });
+      expect(result).toBe('{"value": undefined}');
+    });
+
+    it('should allow disabling newline escaping', () => {
+      const input = '{"text": "Hello,\nWorld"}';
+      const result = repairJson(input, {
+        rules: { unescapedNewlines: false },
+      });
+      expect(result).toBe('{"text": "Hello,\nWorld"}');
+    });
+
+    it('should allow enabling only specific rules', () => {
+      const input = "{'key': 'value', // comment\n}";
+      const result = repairJson(input, {
+        rules: {
+          trailingComma: true,
+          singleQuotes: true,
+          singleLineComments: false, // Keep comments
+          multiLineComments: false,
+          unquotedKeys: false,
+          invalidValues: false,
+          unescapedNewlines: false,
+        },
+      });
+      expect(result).toContain('// comment');
+      expect(result).not.toContain("'");
+    });
+  });
+
+  describe('v0.2.0 - StreamingRepair', () => {
+    it('should repair chunks incrementally', () => {
+      const repairer = new StreamingRepair();
+
+      const chunk1 = '{"name": "test';
+      const chunk2 = '", "value": 42,}';
+
+      const result1 = repairer.addChunk(chunk1);
+      const result2 = repairer.addChunk(chunk2);
+      const final = repairer.flush();
+
+      const combined = result1 + result2 + final;
+      expect(JSON.parse(combined)).toEqual({ name: 'test', value: 42 });
+    });
+
+    it('should track repairs in streaming mode', () => {
+      const repairer = new StreamingRepair({ trackRepairs: true });
+
+      repairer.addChunk("{'key': ");
+      repairer.addChunk("'value',}");
+      repairer.flush();
+
+      const repairs = repairer.getRepairs();
+      expect(repairs.some((r) => r.type === 'single_quote')).toBe(true);
+    });
+
+    it('should respect custom rules in streaming mode', () => {
+      const repairer = new StreamingRepair({
+        rules: { singleQuotes: false },
+      });
+
+      const result = repairer.addChunk("{'key': 'value'}") + repairer.flush();
+      expect(result).toContain("'");
+    });
+
+    it('should reset state correctly', () => {
+      const repairer = new StreamingRepair({ trackRepairs: true });
+
+      repairer.addChunk('{"key": "value",}');
+      repairer.flush();
+
+      expect(repairer.getRepairs().length).toBeGreaterThan(0);
+
+      repairer.reset();
+
+      expect(repairer.getRepairs()).toEqual([]);
+    });
+  });
+
+  describe('v0.2.0 - backward compatibility', () => {
+    it('should work with boolean second argument (legacy)', () => {
+      const result = repairJson('{"key": "value",}', true);
+      expect(result.text).toBe('{"key": "value"}');
+      expect(result.repairs.length).toBeGreaterThan(0);
+    });
+
+    it('should work with no options (default)', () => {
+      const result = repairJson('{"key": "value",}');
+      expect(typeof result).toBe('string');
+      expect(result).toBe('{"key": "value"}');
     });
   });
 });

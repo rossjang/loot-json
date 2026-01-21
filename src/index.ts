@@ -39,6 +39,8 @@ export type {
   RepairLog,
   RepairType,
   RepairResult,
+  RepairOptions,
+  RepairRules,
   LootErrorCode,
   // Convenience aliases (shorter names)
   Looted,
@@ -46,11 +48,13 @@ export type {
   LootFieldOpts,
 } from './types';
 
+export { DEFAULT_REPAIR_RULES } from './types';
+
 export { LootError, isLootError } from './types';
 
 // ============================================================================
 // Utilities (Advanced Usage)
 // ============================================================================
 
-export { repairJson } from './repairs';
+export { repairJson, StreamingRepair } from './repairs';
 export { findJsonCandidates, extractFromMarkdown, extractByBraces } from './extractors';

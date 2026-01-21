@@ -1,6 +1,6 @@
 {
   "name": "loot-json",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Don't just parse. Loot it. The ultimate JSON extractor for unstable LLM outputs.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
